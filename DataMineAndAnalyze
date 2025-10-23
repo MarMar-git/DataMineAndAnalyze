@@ -1,0 +1,1 @@
+pkgInstall(['numpy', 'pandas', 'sqlite3','oracledb',  'fractions', 're', 'inspect', 'traceback'])
