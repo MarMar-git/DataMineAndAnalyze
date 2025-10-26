@@ -1,1 +1,271 @@
+SET SERVEROUTPUT OFF;
+SET SERVEROUTPUT ON;
 
+ALTER SESSION SET CONTAINER = FREEPDB1;
+ALTER SESSION SET NLS_COMP=LINGUISTIC;
+ALTER SESSION SET NLS_SORT=BINARY_CI;
+
+CREATE OR REPLACE PACKAGE QueryGenerator IS
+    boolLogPrint BOOLEAN DEFAULT FALSE;
+    FUNCTION QueryBuilder (Obj_Vals IN VARCHAR2 DEFAULT NULL, 
+        obj_name IN VARCHAR2 DEFAULT NULL, obj_user IN VARCHAR2 DEFAULT 'sys', 
+        ObjVals_Cond IN VARCHAR2 DEFAULT NULL, obj_type IN VARCHAR2 DEFAULT 'table') 
+        RETURN VARCHAR2;
+    QueryBuilder_Text VARCHAR2(32767);
+    TYPE tblQueryCursor IS TABLE OF VARCHAR2(32767);
+    FUNCTION QueryCursor RETURN tblQueryCursor; 
+    TYPE tblParamsAndVars IS TABLE OF VARCHAR2(32767);
+    FUNCTION ParamsAndVars_Extract (KeyText IN VARCHAR2 DEFAULT 'BEGIN') 
+        RETURN tblParamsAndVars; END QueryGenerator;
+
+CREATE OR REPLACE PACKAGE BODY QueryGenerator IS
+    FUNCTION QueryBuilder(Obj_Vals IN VARCHAR2 DEFAULT NULL, 
+        obj_name IN VARCHAR2 DEFAULT NULL, obj_user IN VARCHAR2 DEFAULT 'sys', 
+        ObjVals_Cond IN VARCHAR2 DEFAULT NULL, obj_type IN VARCHAR2 DEFAULT 'table') 
+        RETURN VARCHAR2
+        IS TYPE tbl_cols IS TABLE OF VARCHAR2(32767); tbl_cols_hdrs tbl_cols;
+            TYPE tbl_rows IS TABLE OF tbl_cols; tbl_cells tbl_rows := tbl_rows();
+            cur_tbl_hdrs_list VARCHAR2(32767);
+            obj_exists NUMBER; query_result NUMBER;
+        BEGIN IF boolLogPrint = TRUE THEN
+            DBMS_OUTPUT.PUT_LINE(CHR(10)||DBMS_ASSERT.ENQUOTE_LITERAL('QueryGenerator.QueryBuilder')||' function log: '); END IF;
+            IF Obj_Vals = 'all_synonyms' THEN
+                QueryBuilder_Text := 'SELECT owner, synonym_name, table_owner, table_name FROM all_synonyms WHERE owner = '||DBMS_ASSERT.ENQUOTE_LITERAL(UPPER(obj_user))
+                    ||' OR table_owner = '||DBMS_ASSERT.ENQUOTE_LITERAL(UPPER(obj_user))||' ORDER BY owner, synonym_name';
+            ELSIF Obj_Vals = 'dba_scheduler_job_run_details' THEN
+                QueryBuilder_Text := 'SELECT job_name, status, error#, actual_start_date, run_duration FROM dba_scheduler_job_run_details WHERE sys_main_job';
+            ELSIF Obj_Vals = 'dba_scheduler_jobs' THEN
+                QueryBuilder_Text := 'SELECT job_name, state, next_run_date FROM dba_scheduler_jobs';
+            ELSIF Obj_Vals = 'v$session' THEN
+                QueryBuilder_Text := 'SELECT SID s, serial# sn, username FROM v$session ORDER BY username, serial# sn';
+            ELSIF Obj_Vals = 'v$version' THEN
+                QueryBuilder_Text := 'SELECT banner FROM v$version';
+            ELSIF Obj_Vals = 'all_tab_columns' THEN
+                QueryBuilder_Text := 'SELECT column_name, data_type, table_name, owner FROM all_tab_columns WHERE (owner, table_name) = (('
+                    ||DBMS_ASSERT.ENQUOTE_LITERAL(UPPER(obj_user))||', '||DBMS_ASSERT.ENQUOTE_LITERAL(UPPER(obj_name))||'))'||' ORDER BY column_name, data_type';
+            ELSIF Obj_Vals = 'all_objects' THEN
+                QueryBuilder_Text := 'SELECT object_name, object_type, status, created, last_ddl_time, owner FROM all_objects WHERE (owner, object_name) = (('
+                    ||DBMS_ASSERT.ENQUOTE_LITERAL(UPPER(obj_user))||', '||DBMS_ASSERT.ENQUOTE_LITERAL(UPPER(obj_name))||')) ORDER BY object_name, last_ddl_time';
+            ELSIF Obj_Vals = 'all_types' THEN
+                QueryBuilder_Text := 'SELECT type_name, typecode, owner FROM all_types ORDER BY owner, type_name';
+            ELSIF Obj_Vals = 'all_errors' THEN
+                QueryBuilder_Text := 'SELECT name, type, sequence, text, owner FROM all_errors ORDER BY owner, name';
+            ELSIF Obj_Vals = 'DBA_SYS_PRIVS' THEN
+                QueryBuilder_Text := 'SELECT privilege, admin_option, common, inherited FROM DBA_SYS_PRIVS WHERE (grantee, privilege) = (('
+                    ||DBMS_ASSERT.ENQUOTE_LITERAL(UPPER(obj_user))||', '||DBMS_ASSERT.ENQUOTE_LITERAL(UPPER(obj_name))||')) ORDER BY privilege'; 
+            ELSIF Obj_Vals = 'all_source' THEN
+                --does not work for package
+                QueryBuilder_Text := 'SELECT text FROM all_source WHERE name = '||DBMS_ASSERT.ENQUOTE_LITERAL(UPPER(obj_name))
+                    ||CHR(10)||CHR(9)||' AND line BETWEEN 1 AND (SELECT line FROM all_source WHERE name = '||DBMS_ASSERT.ENQUOTE_LITERAL(UPPER(obj_name))
+                    ||CHR(9)||' AND text LIKE '||DBMS_ASSERT.ENQUOTE_LITERAL('%BEGIN%')||')';
+            ELSIF Obj_Vals = 'all_source, all_arguments' THEN
+                QueryBuilder_Text := 'SELECT text, NULL AS col_empty FROM all_source WHERE name = '||DBMS_ASSERT.ENQUOTE_LITERAL(UPPER(obj_name))
+                    ||CHR(10)||CHR(9)||' AND line BETWEEN 1 AND (SELECT line FROM all_source WHERE name = '||DBMS_ASSERT.ENQUOTE_LITERAL(UPPER(obj_name))
+                    ||' AND text LIKE '||DBMS_ASSERT.ENQUOTE_LITERAL('%BEGIN%')||')'
+                    ||CHR(10)||CHR(9)||' UNION ALL SELECT argument_name, data_type FROM all_arguments WHERE object_name = '||DBMS_ASSERT.ENQUOTE_LITERAL(UPPER(obj_name)); END IF;
+        RETURN QueryBuilder_Text; END QueryBuilder;
+    FUNCTION QueryCursor RETURN tblQueryCursor
+        IS QueryCursor_TableRows tblQueryCursor := tblQueryCursor();
+            dbms_sql_hdrs_name DBMS_SQL.DESC_TAB2;
+            tbl_cols_hdrs_name VARCHAR2(32767); tbl_rows_text VARCHAR2(32767);
+            cur_id INTEGER; tbl_cols_number INTEGER; query_exec INTEGER; tbl_rows_number INTEGER := 0;
+            TYPE tbl_cols IS TABLE OF VARCHAR2(32767); tbl_cols_hdrs tbl_cols;
+                TYPE tbl_rows IS TABLE OF tbl_cols;
+                    tbl_cells tbl_rows := tbl_rows();
+            iSkip BOOLEAN DEFAULT TRUE;
+        BEGIN IF boolLogPrint = TRUE THEN
+            DBMS_OUTPUT.PUT_LINE(CHR(10)||DBMS_ASSERT.ENQUOTE_LITERAL('QueryGenerator.QueryCursor')||' function log: '); 
+            DBMS_OUTPUT.PUT_LINE(CHR(9)||'QueryBuilder_Text: '||QueryBuilder_Text); END IF;
+            cur_id := DBMS_SQL.OPEN_CURSOR;
+            DBMS_SQL.PARSE(cur_id, QueryBuilder_Text, DBMS_SQL.NATIVE);
+            DBMS_SQL.DESCRIBE_COLUMNS2(cur_id, tbl_cols_number, dbms_sql_hdrs_name);
+            query_exec := DBMS_SQL.EXECUTE(cur_id);
+            IF boolLogPrint = TRUE THEN
+                DBMS_OUTPUT.PUT_LINE(CHR(9)||'Id: '||cur_id||chr(10)||CHR(9)||'Columns count: '||tbl_cols_number); END IF;
+            FOR i IN 1 .. tbl_cols_number LOOP
+                DBMS_SQL.DEFINE_COLUMN(cur_id, i, dbms_sql_hdrs_name(i).col_name, 4000);
+                tbl_cols_hdrs_name := dbms_sql_hdrs_name(i).col_name;
+                query_exec := DBMS_SQL.EXECUTE(cur_id);
+                WHILE DBMS_SQL.FETCH_ROWS(cur_id) > 0 LOOP
+                    tbl_rows_number := tbl_rows_number + 1;
+                    DBMS_SQL.COLUMN_VALUE(cur_id, i, dbms_sql_hdrs_name(i).col_name);
+                    tbl_rows_text := TRIM(REPLACE(REPLACE(dbms_sql_hdrs_name(i).col_name,CHR(10)),CHR(9)));
+                    IF boolLogPrint = TRUE THEN
+                        DBMS_OUTPUT.PUT(CHR(9)||'Cur (r'||tbl_rows_number||',c'||i||') '||tbl_cols_hdrs_name||': '); END IF;
+                    IF i = 1 THEN
+                        tbl_cells.EXTEND;
+                        tbl_cells(tbl_cells.COUNT) := tbl_cols(tbl_rows_text);
+                    ELSE
+                        tbl_cells(tbl_rows_number).EXTEND;
+                        tbl_cells(tbl_rows_number)(i) := tbl_rows_text; END IF; 
+                    IF boolLogPrint = TRUE THEN
+                        DBMS_OUTPUT.PUT_LINE(CHR(9)||tbl_rows_text); END IF; END LOOP;
+                tbl_rows_number := 0; END LOOP;
+            FOR i IN 1 .. tbl_cells.COUNT LOOP
+                tbl_rows_text := NULL;
+                FOR i2 IN 1 .. tbl_cells(i).COUNT LOOP
+                    IF i = 1 AND tbl_cells(i)(i2) IS NULL THEN
+                        iSkip := TRUE;
+                        EXIT; END IF;
+                    IF boolLogPrint = TRUE THEN
+                        DBMS_OUTPUT.PUT_LINE(CHR(9)||'QryCur_TblRows'||CHR(32)||'(r'||i||', c'||i2||')'||CHR(32)||tbl_cells(i)(i2)); END IF;
+                    IF tbl_rows_text IS NULL THEN
+                        tbl_rows_text := tbl_cells(i)(i2);
+                    ELSIF tbl_cells(i)(i2) IS NOT NULL AND tbl_rows_text IS NOT NULL THEN
+                        tbl_rows_text := tbl_rows_text||CHR(32)||tbl_cells(i)(i2); END IF; END LOOP;
+                IF iSkip = TRUE THEN
+                    iSkip := FALSE;
+                    CONTINUE; END IF;
+                QueryCursor_TableRows.EXTEND;
+                QueryCursor_TableRows(QueryCursor_TableRows.COUNT) := tbl_rows_text; END LOOP; 
+            DBMS_SQL.CLOSE_CURSOR(cur_id); RETURN QueryCursor_TableRows; 
+        EXCEPTION WHEN OTHERS THEN
+            DBMS_OUTPUT.PUT_LINE(CHR(10)||DBMS_ASSERT.ENQUOTE_LITERAL('QueryGenerator.QueryCursor')||' error: '||CHR(10)||CHR(9)||SQLERRM);
+            IF SQLCODE = -06502 AND tbl_rows_number IS NULL THEN
+                DBMS_OUTPUT.PUT_LINE(CHR(9)||DBMS_ASSERT.ENQUOTE_LITERAL('tbl_rows_number')||' has to be '||DBMS_ASSERT.ENQUOTE_LITERAL(':= 0')||' to allow iteration.');
+            ELSIF SQLCODE = -06531 AND tbl_rows_number IS NOT NULL THEN
+                DBMS_OUTPUT.PUT_LINE(CHR(9)||'Extension of '||DBMS_ASSERT.ENQUOTE_LITERAL('tbl_cells')||' did not work.');
+            ELSE
+                DBMS_OUTPUT.PUT_LINE(SQLERRM); END IF; END QueryCursor; 
+    FUNCTION ParamsAndVars_Extract (KeyText IN VARCHAR2 DEFAULT 'BEGIN') RETURN tblParamsAndVars
+        IS SpecChar_Count NUMBER; SpecChar_Last NUMBER; SpecChar_Next NUMBER; SpecChar_Main NUMBER; 
+            VarName_Pos NUMBER; VarType_Pos NUMBER; tblRow_Idx NUMBER;  tblRow_ChrCount NUMBER;
+            ParamsAndVars_RowFirst NUMBER;
+            SpecChar VARCHAR2(32767) := ';'; tblRow_Val VARCHAR2(32767);
+            tblQueryCursor_Row tblQueryCursor;
+            tblParamsAndVars_Row tblParamsAndVars := tblParamsAndVars();
+        BEGIN IF QueryBuilder_Text LIKE '%FROM all_source%' THEN
+            tblQueryCursor_Row := QueryCursor;
+            IF boolLogPrint = TRUE THEN
+                DBMS_OUTPUT.PUT_LINE(CHR(10)||DBMS_ASSERT.ENQUOTE_LITERAL('QueryGenerator.ParamsAndVars_Extract')||' function log: ');
+                DBMS_OUTPUT.PUT_LINE(CHR(9)||'tblQueryCursor_Rows: '||tblQueryCursor_Row.COUNT); END IF;
+            FOR i IN 1 .. tblQueryCursor_Row.COUNT LOOP
+                tblRow_Val := tblQueryCursor_Row(i);
+                IF boolLogPrint = TRUE THEN
+                    DBMS_OUTPUT.PUT_LINE(CHR(9)||'(r'||i||')'||CHR(32)||tblRow_Val); END IF;
+                SpecChar_Count := LENGTH(tblRow_Val)-LENGTH(REPLACE(tblRow_Val, SpecChar));
+                IF SpecChar_Count != 0 AND ParamsAndVars_RowFirst IS NULL THEN
+                    ParamsAndVars_RowFirst := i; 
+                ELSIF tblRow_Val LIKE KeyText AND ParamsAndVars_RowFirst IS NULL THEN
+                    ParamsAndVars_RowFirst := i + 1; END IF; END LOOP;
+                IF ParamsAndVars_RowFirst IS NULL THEN
+                    ParamsAndVars_RowFirst := 1; END IF;
+                IF boolLogPrint = TRUE THEN
+                    DBMS_OUTPUT.PUT_LINE(CHR(9)||'ParamsAndVars_RowFirst:'||CHR(32)||DBMS_ASSERT.ENQUOTE_LITERAL(ParamsAndVars_RowFirst)
+                        ||'| tblQueryCursor_Row:'||CHR(32)||DBMS_ASSERT.ENQUOTE_LITERAL(tblQueryCursor_Row.COUNT)); END IF;
+            FOR i IN ParamsAndVars_RowFirst .. tblQueryCursor_Row.COUNT LOOP
+                tblRow_Val := tblQueryCursor_Row(i);
+                IF boolLogPrint = TRUE THEN
+                    DBMS_OUTPUT.PUT_LINE(CHR(9)||'(r'||i||')'||CHR(32)||tblRow_Val); END IF;
+                IF tblRow_Val LIKE '%'||SpecChar||'%' THEN
+                    SpecChar_Count := LENGTH(tblRow_Val)-LENGTH(REPLACE(tblRow_Val, SpecChar));
+                    IF boolLogPrint = TRUE THEN
+                        DBMS_OUTPUT.PUT_LINE(CHR(9)||DBMS_ASSERT.ENQUOTE_LITERAL('i'||i)||': '||tblRow_Val||'| '||'SpecChar_Count: '||SpecChar_Count); END IF;
+                    SpecChar_Last := NULL;
+                    SpecChar_Next := NULL;
+                    FOR j IN 1..SpecChar_Count LOOP
+                        tblParamsAndVars_Row.EXTEND;
+                        tblRow_Idx := tblParamsAndVars_Row.COUNT;
+                        tblRow_Val := tblQueryCursor_Row(i); 
+                        IF j = 1 THEN
+                            SpecChar_Next := INSTR(tblRow_Val,SpecChar,1,j);
+                            tblRow_Val := SUBSTR(tblRow_Val,1,SpecChar_Next-1);
+                        ELSIF j = SpecChar_Count THEN 
+                            SpecChar_Last := SpecChar_Next;
+                            SpecChar_Next := INSTR(tblRow_Val,SpecChar,1,j);
+                            tblRow_Val := SUBSTR(tblRow_Val,SpecChar_Last+1,SpecChar_Next-SpecChar_Last-1);
+                        ELSE 
+                            SpecChar_Last := SpecChar_Next; 
+                            SpecChar_Next := INSTR(tblRow_Val,SpecChar,1,j);
+                            tblRow_Val :=  SUBSTR(tblRow_Val,SpecChar_Last+1,SpecChar_Next-SpecChar_Last-1); END IF;
+                        IF boolLogPrint = TRUE THEN
+                            DBMS_OUTPUT.PUT_LINE(CHR(9)||DBMS_ASSERT.ENQUOTE_LITERAL('j'||j)||': '||CHR(32)||'SpecChar_Next: '||SpecChar_Next
+                                ||'| SpecChar_Last: '||SpecChar_Last||CHR(9)||'| tblParamsAndVars_Row('||tblRow_Idx||'): '||tblRow_Val); END IF;
+                        tblRow_ChrCount := LENGTH(tblRow_Val);
+                        IF INSTR(tblRow_Val,'IS RECORD') != 0 THEN
+                            SpecChar_Main := INSTR(tblRow_Val,'IS RECORD');
+                            SpecChar_Main := INSTR(tblRow_Val,CHR(32),SpecChar_Main-tblRow_ChrCount-2);
+                        ELSIF INSTR(tblRow_Val,'IS TABLE') != 0 THEN
+                            SpecChar_Main := INSTR(tblRow_Val,'IS TABLE');
+                            SpecChar_Main := INSTR(tblRow_Val,CHR(32),SpecChar_Main-tblRow_ChrCount-2);
+                        ELSIF INSTR(tblRow_Val,'DEFAULT') != 0 THEN
+                            SpecChar_Main := INSTR(tblRow_Val,'DEFAULT');
+                            SpecChar_Main := INSTR(tblRow_Val,CHR(32),SpecChar_Main-tblRow_ChrCount-2,2);
+                        ELSIF INSTR(tblRow_Val,':=') != 0 THEN
+                            SpecChar_Main := INSTR(tblRow_Val,':=');
+                            SpecChar_Main := INSTR(tblRow_Val,CHR(32),SpecChar_Main-tblRow_ChrCount-2,2);
+                        ELSIF INSTR(tblRow_Val,'%TYPE') != 0 THEN
+                            SpecChar_Main := INSTR(tblRow_Val,'%TYPE');
+                            SpecChar_Main := INSTR(tblRow_Val,CHR(32),SpecChar_Main-tblRow_ChrCount-2);
+                        ELSIF INSTR(tblRow_Val,'%ROWTYPE') != 0 THEN
+                            SpecChar_Main := INSTR(tblRow_Val,'%ROWTYPE');
+                            SpecChar_Main := INSTR(tblRow_Val,CHR(32),SpecChar_Main-tblRow_ChrCount-2);
+                        ELSE
+                            SpecChar_Main := INSTR(tblRow_Val,CHR(32),-1); END IF;
+                        IF INSTR(tblRow_Val,CHR(32),SpecChar_Main-tblRow_ChrCount-2) !=0 THEN
+                            VarName_Pos := INSTR(tblRow_Val,CHR(32),SpecChar_Main-tblRow_ChrCount-2)+1;
+                        ELSE
+                            VarName_Pos := 1; END IF;
+                        IF INSTR(tblRow_Val,'IS RECORD') != 0 OR INSTR(tblRow_Val,'IS TABLE') != 0 THEN
+                            VarType_Pos := tblRow_ChrCount+1;
+                        ELSIF INSTR(tblRow_Val,CHR(32),SpecChar_Main+1) != 0 THEN
+                            VarType_Pos := INSTR(tblRow_Val,CHR(32),SpecChar_Main+1);
+                        ELSE
+                            VarType_Pos := tblRow_ChrCount+1; END IF;
+                        IF boolLogPrint = TRUE THEN
+                            DBMS_OUTPUT.PUT_LINE(CHR(9)||'VarType_Pos: '||VarType_Pos||'| VarName_Pos: '||VarName_Pos||'| SpecChar_Main: '||SpecChar_Main);
+                            DBMS_OUTPUT.PUT_LINE(CHR(9)||'VarName: '||DBMS_ASSERT.ENQUOTE_LITERAL(TRIM(SUBSTR(tblRow_Val, VarName_Pos, SpecChar_Main-VarName_Pos)))
+                                 ||'| VarType: '||DBMS_ASSERT.ENQUOTE_LITERAL(TRIM(SUBSTR(tblRow_Val, SpecChar_Main, VarType_Pos-SpecChar_Main)))); END IF;
+                        tblParamsAndVars_Row(tblRow_Idx) := SUBSTR(tblRow_Val, VarName_Pos, VarType_Pos-VarName_Pos); END LOOP;
+                ELSIF tblRow_Val NOT LIKE '%'||KeyText||'%' THEN
+                    tblParamsAndVars_Row.EXTEND;
+                    tblRow_Idx := tblParamsAndVars_Row.COUNT;
+                    tblRow_ChrCount := LENGTH(tblRow_Val);
+                    SpecChar_Main := INSTR(tblRow_Val,CHR(32));
+                    IF boolLogPrint = TRUE THEN
+                        DBMS_OUTPUT.PUT_LINE(CHR(9)||'SpecChar_Main: '||SpecChar_Main);
+                        DBMS_OUTPUT.PUT_LINE(CHR(9)||'VarName: '||DBMS_ASSERT.ENQUOTE_LITERAL(TRIM(SUBSTR(tblRow_Val, 1, SpecChar_Main-1)))
+                            ||'| VarType: '||DBMS_ASSERT.ENQUOTE_LITERAL(TRIM(SUBSTR(tblRow_Val, SpecChar_Main, tblRow_ChrCount-SpecChar_Main+1)))); END IF;
+                    tblParamsAndVars_Row(tblRow_Idx) := TRIM(SUBSTR(tblRow_Val, 1, SpecChar_Main-1))
+                        ||CHR(32)||TRIM(SUBSTR(tblRow_Val, SpecChar_Main, tblRow_ChrCount-SpecChar_Main+1)); END IF; END LOOP;
+--                            END IF; 
+        RETURN tblParamsAndVars_Row; END IF;
+        EXCEPTION WHEN OTHERS THEN
+            DBMS_OUTPUT.PUT_LINE(CHR(10)||DBMS_ASSERT.ENQUOTE_LITERAL('QueryGenerator.ParamsAndVars_Extract')||' error: '||CHR(10)||SQLERRM);
+            IF SQLCODE = -06531 THEN
+                DBMS_OUTPUT.PUT_LINE('Initiate collection by assigning dependent variable e.g. '||DBMS_ASSERT.ENQUOTE_LITERAL('var coll := coll()')); 
+            ELSIF SQLCODE = -06550 THEN
+                DBMS_OUTPUT.PUT_LINE('1. Declare variable returned by cursor function (e.g. '||DBMS_ASSERT.ENQUOTE_LITERAL('var varCur')
+                    ||') and then initiate the variable by referring to the function (e.g. '||DBMS_ASSERT.ENQUOTE_LITERAL('var := fncCur')||')'||CHR(10)
+                    ||'2. Function declared to return '||DBMS_ASSERT.ENQUOTE_LITERAL('TYPE tblName TABLE OF VARCHAR2')||' should return variable declared as '
+                    ||DBMS_ASSERT.ENQUOTE_LITERAL('var tblName := tblName()')); END IF; END ParamsAndVars_Extract; END QueryGenerator;
+
+CREATE OR REPLACE FUNCTION QlyChck(nameObjUser IN VARCHAR2, nameObj IN VARCHAR2, typeObj IN VARCHAR2, typeLog IN VARCHAR2 DEFAULT 'beg', 
+    numbErr IN NUMBER DEFAULT NULL, fncQlyChck_boolTestMode IN BOOLEAN DEFAULT FALSE) RETURN VARCHAR2
+    IS msg_text VARCHAR2(32767); fncQlyChck_txtQry VARCHAR2(32767); query_LiteralResult VARCHAR2(32767);
+        strVarsColl_ElemVal VARCHAR2(32767); strVarsColl_ElemType VARCHAR2(32767); strVarsColl VARCHAR2(32767);
+        query_NumericResult NUMBER;
+        ObjVar QueryGenerator.tblParamsAndVars;
+    BEGIN CASE typeLog
+        WHEN 'beg' THEN
+            QueryGenerator.boolLogPrint := fncQlyChck_boolTestMode;
+            fncQlyChck_txtQry := QueryGenerator.QueryBuilder(Obj_Vals=>'all_source, all_arguments',obj_name=>nameObj);
+            ObjVar := QueryGenerator.ParamsAndVars_Extract;
+            strVarsColl := CHR(10)||DBMS_ASSERT.ENQUOTE_LITERAL(nameObj)||' strVarsColl:'||CHR(10);
+            FOR i IN 1 .. ObjVar.COUNT LOOP
+                strVarsColl_ElemVal := SUBSTR(ObjVar(i),1,INSTR(ObjVar(i),CHR(32))-1);
+                strVarsColl_ElemType := SUBSTR(ObjVar(i),INSTR(ObjVar(i),CHR(32))+1,LENGTH(ObjVar(i))-INSTR(ObjVar(i),CHR(32)));
+                strVarsColl := strVarsColl||strVarsColl_ElemVal||CHR(32)||strVarsColl_ElemType||'| '; END LOOP;
+            IF fncQlyChck_boolTestMode = TRUE THEN
+                DBMS_OUTPUT.PUT_LINE(strVarsColl); END IF; END CASE;
+    RETURN msg_text; 
+    EXCEPTION WHEN OTHERS THEN
+        DBMS_OUTPUT.PUT_LINE(CHR(10)||DBMS_ASSERT.ENQUOTE_LITERAL('QlyChck')||CHR(32)||'error: '||CHR(10)||SQLERRM); END QlyChck;
+
+DECLARE
+    print_outside_pkg2 QueryGenerator.tblParamsAndVars;
+BEGIN QueryGenerator.boolLogPrint := TRUE; --replace with 'TRUE' to see how the output is prepared
+    DBMS_OUTPUT.PUT_LINE(QueryGenerator.QueryBuilder(Obj_Vals=>'all_source, all_arguments',obj_name=>'UserPrivileges'));
+    print_outside_pkg2 := QueryGenerator.ParamsAndVars_Extract;
+    FOR i IN 1 .. print_outside_pkg2.COUNT LOOP
+        DBMS_OUTPUT.PUT_LINE(print_outside_pkg2(i)); END LOOP; END;
