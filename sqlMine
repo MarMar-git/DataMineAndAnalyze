@@ -264,7 +264,7 @@ CREATE OR REPLACE FUNCTION QlyChck(nameObjUser IN VARCHAR2, nameObj IN VARCHAR2,
 
 DECLARE
     print_outside_pkg2 QueryGenerator.tblParamsAndVars;
-BEGIN QueryGenerator.boolLogPrint := TRUE; --replace with 'TRUE' to see how the output is prepared
+BEGIN QueryGenerator.boolLogPrint := FALSE; --replace with 'TRUE' to see how the output is prepared
     DBMS_OUTPUT.PUT_LINE(QueryGenerator.QueryBuilder(Obj_Vals=>'all_source, all_arguments',obj_name=>'UserPrivileges'));
     print_outside_pkg2 := QueryGenerator.ParamsAndVars_Extract;
     FOR i IN 1 .. print_outside_pkg2.COUNT LOOP
