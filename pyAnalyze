@@ -1,1 +1,210 @@
-pkgInstall(['numpy', 'pandas', 'sqlite3','oracledb',  'fractions', 're', 'inspect', 'traceback'])
+import subprocess
+import sys
+import importlib.util
+
+def pkgInstall(strPkgList):
+    for strPkg in strPkgList:
+        if importlib.util.find_spec(strPkg) is None:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", strPkg])
+pkgInstall(['numpy', 'pandas', 'sqlite3', 'fractions', 're'])
+
+import numpy
+import pandas
+from fractions import Fraction
+import re
+import sqlite3
+
+def strShowPerfMsg(strMsg, boolCtrlMode = False):
+    if boolCtrlMode is True:
+       print(strMsg)
+
+def strProcBySQL(strInput, strDelimiter, boolAllOccur = True, boolTxtProc = True, boolCtrlMode = False):
+    strShowPerfMsg('\nstrProcBySQL_logg:\n\tstrInput = ' + str(strInput) \
+               + '\n\tlen(strInput) = ' + str(len(strInput)), boolCtrlMode)
+    numbLimiterPos  = strInput.find(strDelimiter)
+    match boolTxtProc:
+        case True:  #Limit
+            strOutput = strInput[numbLimiterPos + 1: len(strInput)].strip()   #strInput[::-1]   reverse string
+        case False: #Extract
+            strShowPerfMsg('\t' + strDelimiter + '.count = ' + str(strInput.count(strDelimiter)), boolCtrlMode)
+            strOutput = []
+            strPat = '(?<=' + strDelimiter + ')'
+            strSubstrList = re.split(strPat,strInput)
+            for strSubstr in strSubstrList:
+                if re.search(strDelimiter, strSubstr) is None:
+                    continue
+                posSpecCharList = []
+                for intChar in range(1, len(strSubstr)):
+                    posSpecChar = strSubstr[intChar:intChar+1]
+                    if posSpecChar == chr(32):  #strSubstr.count(chr(32) != strSubstr.split(chr(32))
+                        posSpecCharList.append(intChar)
+                posLimitersTuple = re.search(strDelimiter, strSubstr).span()
+                strTblNames = ('posSpecCharReq', 'posSpecChar0')
+                strQryTxtList = []
+                strQryTxt = 'SELECT ' + strTblNames[0] + '_Val AS tupleVal, ' + strTblNames[1] + '_Val AS listVal, ' \
+                            + 'CASE TRUE WHEN listVal > ' + str(max(posLimitersTuple)) \
+                            + ' AND ' + str(max(posLimitersTuple)) + ' = tupleVal' \
+                            + ' OR listVal < ' + str(min(posLimitersTuple)) \
+                            + ' AND ' + str(min(posLimitersTuple)) + ' = tupleVal THEN ' \
+                            + 'ABS(' + strTblNames[0] + '_Val - ' + strTblNames[1] + '_Val' + ') END AS ValDiff ' \
+                            + 'FROM ' + strTblNames[1] + ' CROSS JOIN ' + strTblNames[0] + ' ORDER BY ValDiff'
+                strQryTxtList.append(strQryTxt)
+                strQryTxt = 'WITH diffCartProd AS (' + strQryTxt + ')' \
+                            + '(SELECT tupleVal, listVal FROM diffCartProd ' \
+                            + 'WHERE listVal > (SELECT MAX(tupleVal) FROM diffCartProd) LIMIT 2) ' \
+                            + 'UNION (SELECT tupleVal, listVal FROM diffCartProd ' \
+                            + 'WHERE listVal < (SELECT MIN(tupleVal) FROM diffCartProd) LIMIT 2);'
+                strQryTxtList.append(strQryTxt)
+                posLimitersList = list(set(tblFromTupleAndLists(
+                    strQryTxtList, strTblNames, boolCtrlMode, posSpecCharList, posLimitersTuple)['listVal'].tolist()))
+                intSubstrStart = min(posLimitersList)
+                intSubstrEnd = max(posLimitersTuple)
+                strFeatToList = strSubstr[intSubstrStart:intSubstrStart + intSubstrEnd - intSubstrStart].strip()
+                strShowPerfMsg('\nstrProcBySQL_logg:\n\tstrSubstr = ' + strSubstr
+                            + '\n\tstrDelimiter = ' + strDelimiter
+                            + '\n\tlen(strSubstr) = ' + str(len(strSubstr))
+                            + '\n\tposSpecCharList: ' + str(posSpecCharList)
+                            + '\n\tposLimitersTuple: ' + str(posLimitersTuple)
+                            + '\n\tposLimitersList: ' + str(posLimitersList)
+                            + '\n\tstrFeatToList = ' + strFeatToList, boolCtrlMode)
+                strOutput.append(strSubstr[intSubstrStart:intSubstrStart + intSubstrEnd - intSubstrStart].strip())
+                if boolAllOccur is False:
+                    break
+    return strOutput
+def strRecurQry(dictParams, strSeqType, str1stTerm, strSeqForm, strRecurQry_boolGrowthType = True, boolCtrlMode = False):
+    listParams = list(dictParams.values())
+    if boolCtrlMode is True:
+        print("\nstrRecurQry_logg:")
+    match strRecurQry_boolGrowthType:
+        case True:
+            strGrowthType = 'i + 1'
+        case False:
+            strGrowthType = 'i - 1'
+    strRecurQry \
+        = "WITH RECURSIVE req_" + strSeqType + "(i, iTerm)" \
+            + " AS (SELECT 0, CAST(" + str1stTerm + " AS DECIMAL (18,3))"  \
+            + " UNION ALL SELECT " \
+            + strGrowthType + ", " \
+            + strSeqForm + " FROM req_" + strSeqType + " WHERE i < :iTerms)" \
+            + " INSERT INTO tempSeqTbl (i, iTerm) " \
+            + " SELECT i, iTerm FROM req_" + strSeqType + ";"
+    strRecurQryAlt = strRecurQry
+    for i in dictParams.keys():
+        strRecurQryAlt = re.sub('.' + str(i), '?', strRecurQryAlt, count=0, flags=0)
+    if boolCtrlMode is True:
+        print('\tlistParams = ' + str(listParams) + '\n\tstrRecurQry = ' + strRecurQry + '\n\t' + strSeqType + '(i) = ' + strSeqForm)
+    return "" + strRecurQryAlt + "", listParams
+class Seq:
+    def __init__(self, iTerms, iMax, num1stTerm = 2, rArit = 0, rGeom = 0, rExpo = 0, rHarm = 0, rCpd = 0, boolCtrlMode = False):
+        self.iTerms = iTerms
+        self.iMax = iMax
+        self.num1stTerm = num1stTerm
+        self.rArit = rArit
+        self.rGeom = rGeom
+        self.rExpo = rExpo
+        self.rHarm = rHarm
+        self.rCpd = rCpd
+        self.boolCtrlMode = boolCtrlMode
+    def tblSmpSeq (self, boolFibonacci = False, tblSmpSeq_boolGrowthType = True):
+        if self.boolCtrlMode is True:
+            print("\ntblSmpSeq_logg:")
+        dictParams = {"num1stTerm": self.num1stTerm, "iTerms": self.iTerms}
+        if self.rArit != 0:
+            strRecurQryAlt, param_list \
+                = strRecurQry(dictParams, 'seqArit', ':num1stTerm',
+                    str(self.num1stTerm) + " + " + str(self.rArit) + " * i",
+                    strRecurQry_boolGrowthType = tblSmpSeq_boolGrowthType, boolCtrlMode=self.boolCtrlMode)
+        elif self.rGeom !=0:
+            strRecurQryAlt, param_list \
+                = strRecurQry(dictParams, 'seqGeom', ':num1stTerm',
+                    str(self.num1stTerm) + " * POWER(" + str(self.rGeom) + ", i)",
+                    strRecurQry_boolGrowthType = tblSmpSeq_boolGrowthType, boolCtrlMode=self.boolCtrlMode)
+        elif self.rHarm != 0:
+            dictParams.update({'num1stTerm': 1/self.num1stTerm})
+            strRecurQryAlt, param_list \
+                = strRecurQry(dictParams, 'seqHarm', ':num1stTerm',
+                    "CASE WHEN (" + str(1/self.num1stTerm) + " + " + str(self.rHarm) + " * i) = 0 THEN NULL" \
+                     + " ELSE 1 / (" + str(1/self.num1stTerm) + " + " + str(self.rHarm) + " * i) END",
+                    strRecurQry_boolGrowthType = tblSmpSeq_boolGrowthType, boolCtrlMode=self.boolCtrlMode)
+        elif self.rExpo !=0:
+            #strDenominator = self.rExpo[self.rExpo.find('/') + 1 : len(self.rExpo)]
+            strDenominator = strProcBySQL(strInput = self.rExpo, strDelimiter = '/', boolCtrlMode=self.boolCtrlMode)
+            if strDenominator == str(2):
+                strSeqType = 'Log2Growth'
+                rExpoAdj = 1/int(2)
+            elif strDenominator == str(10):
+                strSeqType = 'Log10Growth'
+                rExpoAdj = 1/int(10)
+            if strDenominator == str(numpy.e):
+                strSeqType = 'LnGrowth'
+                rExpoAdj = 1/float(numpy.e)
+            dictParams.update({'num1stTerm': 0})
+            strRecurQryAlt, param_list \
+                = strRecurQry(dictParams, strSeqType, ':num1stTerm',
+                    str(self.num1stTerm) + " * POWER(i, (" + str(round(rExpoAdj,3)) + "))",
+                    strRecurQry_boolGrowthType = tblSmpSeq_boolGrowthType, boolCtrlMode=self.boolCtrlMode)
+        elif self.rCpd !=0:
+            strRecurQryAlt, param_list \
+                = strRecurQry(dictParams, 'rCpd', ':num1stTerm',
+                    str(self.num1stTerm) + " * POWER((1 + " + str(self.rCpd) + "), (" + str(Fraction(self.rCpd).denominator) + " * i))",
+                    strRecurQry_boolGrowthType = tblSmpSeq_boolGrowthType, boolCtrlMode=self.boolCtrlMode)
+        conn = sqlite3.connect('Seq.db')
+        cursor = conn.cursor()
+        strCrtTbl = 'CREATE TEMPORARY TABLE IF NOT EXISTS tempSeqTbl' \
+                + '(i INTEGER PRIMARY KEY, iCum DECIMAL(18, 3), iTerm DECIMAL(18, 3))'
+        cursor.execute(strCrtTbl)
+        cursor.execute(strRecurQryAlt, param_list)
+        nameCols = 'iTerm'
+        cursor.execute('SELECT ' + nameCols + ' FROM tempSeqTbl WHERE i != 0')
+        tblSmpSeq = pandas.DataFrame(cursor.fetchall(), columns=nameCols.split(','))
+        cursor.close()
+        conn.commit()
+        conn.close()
+        if self.boolCtrlMode is True:
+            print("\ttblSmpSeq:\n" + str(tblSmpSeq))
+        return tblSmpSeq
+def tblFromTupleAndLists(strQryTxtList, strTblNames, boolCtrlMode = False, *lists): #strCombType = ['CartProd', '']
+    strShowPerfMsg('\ntblFromTupleAndLists_logg:', boolCtrlMode)
+    nameTblList = []
+    numbLists = lists
+    for objTypeList in lists:
+        for objType in objTypeList:
+            if isinstance(objType, pandas.DataFrame) is True:
+                numbLists = objTypeList
+                break
+    for idx, numbList in enumerate(numbLists):
+        if isinstance(numbList, pandas.DataFrame) is True:
+            nameTblList.append(strTblNames + str(idx))
+            #duckdb.register(strTblNames + str(idx), numbList)
+            conn = sqlite3.connect(nameTbl)
+            cursor = conn.cursor()
+        elif isinstance(numbList, pandas.DataFrame) is False:
+            if isinstance(numbList, tuple) is True:
+                nameTbl = strTblNames[0]
+            elif isinstance(numbList, tuple) is False:
+                nameTbl = strTblNames[1]
+            nameCol = nameTbl + '_Val'
+            numbTbl = pandas.DataFrame(numbList, columns=[nameCol])
+            #duckdb.register(nameTbl, numbTbl)
+            conn = sqlite3.connect(nameTbl)
+            cursor = conn.cursor()
+            qryListToTbl = 'SELECT ' + nameCol + ' FROM ' + nameTbl
+            #strShowPerfMsg('\n' + qryListToTbl + '\n\t' + str(duckdb.sql(qryListToTbl).df()), boolCtrlMode)
+            strShowPerfMsg('\n' + qryListToTbl + '\n\t' + str(pandas.read_sql_query(qryListToTbl, conn)), boolCtrlMode)
+            nameTblList.append(nameTbl)
+    for strQryTxt in strQryTxtList:
+        #tblFromTupleAndLists = duckdb.execute(strQryTxt).fetchdf()
+        tblFromTupleAndLists = pandas.read_sql_query(strQryTxt, conn)
+        strShowPerfMsg('\n' + str(strQryTxt) + '\n\t' + str(tblFromTupleAndLists), boolCtrlMode)
+    for nameTbl in nameTblList:
+        #duckdb.unregister(nameTbl)
+        cursor.execute('DROP TABLE IF EXISTS '+nameTbl)
+    conn.commit()
+    conn.close()
+    return tblFromTupleAndLists
+
+# Change boolCtrlMode to 'TRUE' to see step-by-step calculations
+print(Seq(iTerms = 5, iMax = 0, rArit = 2, boolCtrlMode = False).tblSmpSeq())
+print(Seq(iTerms = 5, iMax = 0, rGeom = 2, boolCtrlMode = False).tblSmpSeq())
+print(Seq(iTerms = 5, iMax = 0, rHarm = 2, boolCtrlMode = False).tblSmpSeq())
+print(Seq(iTerms = 5, iMax = 0, rExpo = '1/2', boolCtrlMode = False).tblSmpSeq())
